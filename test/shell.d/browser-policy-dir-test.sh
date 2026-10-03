@@ -98,10 +98,13 @@ printf '%s\n' "$spin_old" >"$spin/managed/color.json"
   bad=0
   while (( reads < 500000 )) && [[ ! -e $test_tmp/stop-spinning ]]; do
     reads=$((reads + 1))
-    # Whole-file equality against both known-good contents, not a prefix: a
-    # truncated color.json still starts with '{"BrowserThemeColor": "#' and
-    # would satisfy a prefix check while being exactly the defect under test.
-    read -r content <"$spin/managed/color.json" || content=""
+    # Whole-file equality against both known-good contents, not a prefix and
+    # not just the first line: a truncated color.json still starts with
+    # '{"BrowserThemeColor": "#', and a valid first line followed by garbage is
+    # still a malformed policy file. $(<file) rather than read, which stops at
+    # the first newline; a file that vanished mid-read is a bad read, not a
+    # reason to end the subshell under set -e.
+    content=$(<"$spin/managed/color.json") || content=""
     if [[ $content != "$spin_old" && $content != "$spin_new" ]]; then
       bad=$((bad + 1))
     fi
