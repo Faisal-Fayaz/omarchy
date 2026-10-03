@@ -45,10 +45,25 @@ policy_dir_count=$(sed -n '/^POLICY_DIRS=(/,/^)/p' "$helper" | grep -c '^  /')
   fail "omarchy-theme-set-browser-policy writes only the four known policy directories" \
     "got: $policy_dir_count"
 
-grep -F 'install -m 0644 -o root -g root -T' "$helper" >/dev/null ||
-  fail "omarchy-theme-set-browser-policy installs color.json with install -T"
+# The write has to land as one rename(2), or a browser reading color.json
+# during a theme switch can catch the destination between install(1) unlinking
+# it and recreating it. Staging beside the destination is what keeps that
+# rename inside one filesystem; staging in $policy_dir would additionally put
+# the staged file where the browser reads policy from.
+grep -F 'mktemp "${policy_dir%/*}/.${dest##*/}.omarchy.XXXXXX"' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy stages a hidden sibling in the policy directory's parent"
+grep -F 'mv -Tf -- "$staged" "$dest"' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy replaces color.json with a single rename"
+if grep -E 'install -m 0644.*-T .*"\$dest"' "$helper" >/dev/null; then
+  fail "omarchy-theme-set-browser-policy does not install straight into color.json"
+fi
 if grep -E 'mv -f' "$helper" >/dev/null; then
   fail "omarchy-theme-set-browser-policy does not mv into a planted color.json directory"
+fi
+# Mode and ownership belong on the stage: chmod or chown applied after the
+# rename would leave a published policy file briefly wrong.
+if grep -E 'chmod .*"\$dest"|chown .*"\$dest"' "$helper" >/dev/null; then
+  fail "omarchy-theme-set-browser-policy fixes mode before publishing color.json"
 fi
 
 pass "browser policy helper writes a fixed set of policy directories"

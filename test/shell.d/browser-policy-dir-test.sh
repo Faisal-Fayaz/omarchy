@@ -46,18 +46,74 @@ mode=$(stat -c '%a' "$write_dir/color.json")
 pass "theme colour writes a 0644 color.json"
 
 if (( EUID == 0 )); then
-  skip "running as root; skipping the mktemp-failure check"
+  skip "running as root; skipping the staging-failure check"
 else
-  chmod u+w "$write_dir"
-  export TMPDIR=$test_tmp/missing-tmp
-  if browser_policy_install_color "$write_dir" "#dead00" 2>/dev/null; then
-    fail "theme colour fails when mktemp cannot create a file"
+  # The staged file lands beside the managed directory, so a parent that cannot
+  # be written is what makes staging fail.
+  locked=$test_tmp/locked
+  mkdir -p "$locked/policies/managed"
+  printf '{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}\n' >"$locked/policies/managed/color.json"
+  chmod 0555 "$locked/policies"
+  if browser_policy_install_color "$locked/policies/managed" "#dead00" 2>/dev/null; then
+    chmod 0755 "$locked/policies"
+    fail "theme colour fails when it cannot stage a file beside the policy directory"
   fi
-  unset TMPDIR
-  grep -F '"BrowserThemeColor": "#aabbcc"' "$write_dir/color.json" >/dev/null ||
-    fail "a failed mktemp leaves an existing color.json intact"
-  pass "a failed mktemp does not truncate color.json"
+  chmod 0755 "$locked/policies"
+  grep -F '"BrowserThemeColor": "#aabbcc"' "$locked/policies/managed/color.json" >/dev/null ||
+    fail "a failed staging write leaves an existing color.json intact"
+  pass "a failed staging write does not truncate color.json"
 fi
+
+# Why stage at all: a browser reading its managed policy while the theme
+# changes must see the old file or the new one, never an absent one and never
+# a half-written one. install(1) unlinks the destination before recreating it,
+# which opens exactly that window; a rename(2) has no such window. Spin a
+# reader against repeated writes and require it never to catch one, nor to see
+# a staged file appear in the directory the browser enumerates for policy.
+spin=$test_tmp/spin
+mkdir -p "$spin/managed"
+printf '{"BrowserThemeColor": "#000000", "BrowserColorScheme": "device"}\n' >"$spin/managed/color.json"
+
+(
+  # dotglob so a staged .color.json.omarchy.XXXXXX counts as an entry rather
+  # than hiding behind the plain-* glob; nullglob so an empty directory is
+  # zero entries instead of the literal pattern. A read that races a
+  # disappearing file says so on stderr; count it and keep the output clean.
+  shopt -s nullglob dotglob
+  exec 2>/dev/null
+  reads=0
+  bad=0
+  while (( reads < 500000 )) && [[ ! -e $test_tmp/stop-spinning ]]; do
+    reads=$((reads + 1))
+    if [[ ! -f $spin/managed/color.json ]]; then
+      bad=$((bad + 1))
+      continue
+    fi
+    [[ $(<"$spin/managed/color.json") == '{"BrowserThemeColor": "#'* ]] ||
+      bad=$((bad + 1))
+    entries=("$spin/managed"/*)
+    if (( ${#entries[@]} != 1 )) || [[ ${entries[0]} != "$spin/managed/color.json" ]]; then
+      bad=$((bad + 1))
+    fi
+  done
+  printf '%s %s\n' "$reads" "$bad" >"$test_tmp/spin-result"
+) &
+spin_pid=$!
+
+for _ in $(seq 1 300); do
+  browser_policy_install_color "$spin/managed" "#aabbcc" ||
+    fail "theme colour rewrites color.json while a reader is watching"
+done
+: >"$test_tmp/stop-spinning"
+wait "$spin_pid"
+
+read -r spin_reads spin_bad <"$test_tmp/spin-result"
+(( spin_reads > 1000 )) ||
+  fail "the watching reader got too few reads to prove anything" "reads=$spin_reads"
+(( spin_bad == 0 )) ||
+  fail "a reader never catches color.json absent, half-written, or joined by a staged file" \
+    "reads=$spin_reads bad=$spin_bad"
+pass "replacing color.json never exposes a missing, partial, or extra file to a reader"
 
 printf 'original\n' >"$test_tmp/pwn"
 rm -f "$write_dir/color.json"
