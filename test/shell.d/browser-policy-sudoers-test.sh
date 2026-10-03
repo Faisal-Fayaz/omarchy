@@ -47,11 +47,18 @@ policy_dir_count=$(sed -n '/^POLICY_DIRS=(/,/^)/p' "$helper" | grep -c '^  /')
 
 # The write has to land as one rename(2), or a browser reading color.json
 # during a theme switch can catch the destination between install(1) unlinking
-# it and recreating it. Staging beside the destination is what keeps that
-# rename inside one filesystem; staging in $policy_dir would additionally put
-# the staged file where the browser reads policy from.
-grep -F 'mktemp "${policy_dir%/*}/.${dest##*/}.omarchy.XXXXXX"' "$helper" >/dev/null ||
-  fail "omarchy-theme-set-browser-policy stages a hidden sibling in the policy directory's parent"
+# it and recreating it. The stage has to share a filesystem with the
+# destination for that rename to be atomic, which rules out $TMPDIR and rules
+# out a parent that is a mount of its own; staging in $policy_dir would put the
+# staged file where the browser reads policy from.
+grep -F 'staging_dir=${policy_dir%/*}' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy stages beside the policy directory"
+grep -F 'stat -c %d -- "$staging_dir"' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy checks the stage shares a filesystem with color.json"
+grep -F 'staging_dir=$policy_dir' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy falls back inside a separately mounted policy directory"
+grep -F 'mktemp "$staging_dir/.${dest##*/}.omarchy.XXXXXX"' "$helper" >/dev/null ||
+  fail "omarchy-theme-set-browser-policy stages a hidden sibling of color.json"
 grep -F 'mv -Tf -- "$staged" "$dest"' "$helper" >/dev/null ||
   fail "omarchy-theme-set-browser-policy replaces color.json with a single rename"
 if grep -E 'install -m 0644.*-T .*"\$dest"' "$helper" >/dev/null; then

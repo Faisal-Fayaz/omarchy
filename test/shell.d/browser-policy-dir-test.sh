@@ -5,7 +5,18 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
 test_tmp=$(mktemp -d)
-trap 'rm -rf "$test_tmp"' EXIT
+spin_pid=""
+# The spinning reader below has to be stopped and reaped however this file
+# exits, including a fail inside the write loop, or it keeps burning a core
+# through every remaining test file.
+stop_spinning() {
+  if [[ -n $spin_pid ]]; then
+    : >"$test_tmp/stop-spinning"
+    wait "$spin_pid" 2>/dev/null || true
+    spin_pid=""
+  fi
+}
+trap 'stop_spinning; chmod -R u+rwX "$test_tmp" 2>/dev/null; rm -rf "$test_tmp"' EXIT
 
 export OMARCHY_PATH="$ROOT"
 export OMARCHY_PROVISIONING_DIR="$test_tmp/provisioning"
@@ -72,7 +83,9 @@ fi
 # a staged file appear in the directory the browser enumerates for policy.
 spin=$test_tmp/spin
 mkdir -p "$spin/managed"
-printf '{"BrowserThemeColor": "#000000", "BrowserColorScheme": "device"}\n' >"$spin/managed/color.json"
+spin_old='{"BrowserThemeColor": "#000000", "BrowserColorScheme": "device"}'
+spin_new='{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}'
+printf '%s\n' "$spin_old" >"$spin/managed/color.json"
 
 (
   # dotglob so a staged .color.json.omarchy.XXXXXX counts as an entry rather
@@ -85,12 +98,13 @@ printf '{"BrowserThemeColor": "#000000", "BrowserColorScheme": "device"}\n' >"$s
   bad=0
   while (( reads < 500000 )) && [[ ! -e $test_tmp/stop-spinning ]]; do
     reads=$((reads + 1))
-    if [[ ! -f $spin/managed/color.json ]]; then
+    # Whole-file equality against both known-good contents, not a prefix: a
+    # truncated color.json still starts with '{"BrowserThemeColor": "#' and
+    # would satisfy a prefix check while being exactly the defect under test.
+    read -r content <"$spin/managed/color.json" || content=""
+    if [[ $content != "$spin_old" && $content != "$spin_new" ]]; then
       bad=$((bad + 1))
-      continue
     fi
-    [[ $(<"$spin/managed/color.json") == '{"BrowserThemeColor": "#'* ]] ||
-      bad=$((bad + 1))
     entries=("$spin/managed"/*)
     if (( ${#entries[@]} != 1 )) || [[ ${entries[0]} != "$spin/managed/color.json" ]]; then
       bad=$((bad + 1))
@@ -105,7 +119,8 @@ for _ in $(seq 1 300); do
     fail "theme colour rewrites color.json while a reader is watching"
 done
 : >"$test_tmp/stop-spinning"
-wait "$spin_pid"
+wait "$spin_pid" || true
+spin_pid=""
 
 read -r spin_reads spin_bad <"$test_tmp/spin-result"
 (( spin_reads > 1000 )) ||
@@ -114,6 +129,25 @@ read -r spin_reads spin_bad <"$test_tmp/spin-result"
   fail "a reader never catches color.json absent, half-written, or joined by a staged file" \
     "reads=$spin_reads bad=$spin_bad"
 pass "replacing color.json never exposes a missing, partial, or extra file to a reader"
+
+# The stage has to share a filesystem with the destination or the rename is a
+# cross-device copy and the window comes back. Normally $policy_dir's parent is
+# that filesystem, which is also why the stage lives there; a managed directory
+# that is a mount of its own is the exception, and the stage moves inside it
+# rather than giving up the atomicity.
+browser_policy_same_filesystem "$test_tmp" "$test_tmp/spin" ||
+  fail "a policy directory and its parent on one filesystem are recognised as such"
+if browser_policy_same_filesystem "$test_tmp" "$test_tmp/missing"; then
+  fail "a missing directory is not reported as sharing a filesystem"
+fi
+if [[ -d /dev/shm ]] && [[ $(stat -c %d -- /dev/shm) != $(stat -c %d -- /) ]]; then
+  browser_policy_same_filesystem / /dev/shm &&
+    fail "two filesystems are not reported as sharing one"
+  pass "a separate mount is recognised as a separate filesystem"
+else
+  skip "no second filesystem here; skipping the separate-mount check"
+fi
+pass "the stage lands on the destination's filesystem"
 
 printf 'original\n' >"$test_tmp/pwn"
 rm -f "$write_dir/color.json"
