@@ -59,18 +59,18 @@ pass "theme colour writes a 0644 color.json"
 if (( EUID == 0 )); then
   skip "running as root; skipping the staging-failure check"
 else
-  # The staged file lands beside the managed directory, so a parent that cannot
-  # be written is what makes staging fail.
+  # The staged file lands in the policy directory itself, so that is the
+  # directory that has to be unwritable for staging to fail.
   locked=$test_tmp/locked
-  mkdir -p "$locked/policies/managed"
-  printf '{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}\n' >"$locked/policies/managed/color.json"
-  chmod 0555 "$locked/policies"
-  if browser_policy_install_color "$locked/policies/managed" "#dead00" 2>/dev/null; then
-    chmod 0755 "$locked/policies"
-    fail "theme colour fails when it cannot stage a file beside the policy directory"
+  mkdir -p "$locked/managed"
+  printf '{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}\n' >"$locked/managed/color.json"
+  chmod 0555 "$locked/managed"
+  if browser_policy_install_color "$locked/managed" "#dead00" 2>/dev/null; then
+    chmod 0755 "$locked/managed"
+    fail "theme colour fails when it cannot stage a file in the policy directory"
   fi
-  chmod 0755 "$locked/policies"
-  grep -F '"BrowserThemeColor": "#aabbcc"' "$locked/policies/managed/color.json" >/dev/null ||
+  chmod 0755 "$locked/managed"
+  grep -F '"BrowserThemeColor": "#aabbcc"' "$locked/managed/color.json" >/dev/null ||
     fail "a failed staging write leaves an existing color.json intact"
   pass "a failed staging write does not truncate color.json"
 fi
@@ -79,8 +79,14 @@ fi
 # changes must see the old file or the new one, never an absent one and never
 # a half-written one. install(1) unlinks the destination before recreating it,
 # which opens exactly that window; a rename(2) has no such window. Spin a
-# reader against repeated writes and require it never to catch one, nor to see
-# a staged file appear in the directory the browser enumerates for policy.
+# reader against repeated writes and require it never to catch one.
+#
+# The stage is a sibling inside the policy directory, so it is briefly visible
+# to the browser's enumeration. What has to hold is narrower and checkable:
+# color.json is always one of the two complete policies, the directory holds
+# nothing but color.json and at most one in-flight stage, and the parent --
+# where an earlier version staged, which a bind mount there would turn back
+# into a cross-directory copy -- is never written to at all.
 spin=$test_tmp/spin
 mkdir -p "$spin/managed"
 spin_old='{"BrowserThemeColor": "#000000", "BrowserColorScheme": "device"}'
@@ -94,8 +100,14 @@ printf '%s\n' "$spin_old" >"$spin/managed/color.json"
   # disappearing file says so on stderr; count it and keep the output clean.
   shopt -s nullglob dotglob
   exec 2>/dev/null
+  # This subshell measures the reader, so it must survive whatever the writer
+  # does. Under set -e a file that vanishes mid-read kills the read *and* the
+  # subshell, which would turn the defect this loop exists to catch into an
+  # unexplained exit instead of a bad-read count.
+  set +e
   reads=0
   bad=0
+  stages=0
   while (( reads < 500000 )) && [[ ! -e $test_tmp/stop-spinning ]]; do
     reads=$((reads + 1))
     # Whole-file equality against both known-good contents, not a prefix and
@@ -108,12 +120,25 @@ printf '%s\n' "$spin_old" >"$spin/managed/color.json"
     if [[ $content != "$spin_old" && $content != "$spin_new" ]]; then
       bad=$((bad + 1))
     fi
+
+    # color.json plus at most one stage that is being written right now.
     entries=("$spin/managed"/*)
-    if (( ${#entries[@]} != 1 )) || [[ ${entries[0]} != "$spin/managed/color.json" ]]; then
-      bad=$((bad + 1))
-    fi
+    case ${#entries[@]} in
+      1) [[ ${entries[0]} == "$spin/managed/color.json" ]] || bad=$((bad + 1)) ;;
+      2)
+        [[ ${entries[0]} == "$spin/managed/color.json" ]] || bad=$((bad + 1))
+        [[ ${entries[1]} == "$spin/managed"/.color.json.omarchy.* ]] || bad=$((bad + 1))
+        stages=$((stages + 1))
+        ;;
+      *) bad=$((bad + 1));;
+    esac
+
+    # A stage in the parent would be a cross-directory rename waiting to
+    # degrade into a copy, which is what a bind mount there would cause.
+    parents=("$spin"/*)
+    (( ${#parents[@]} == 1 )) || bad=$((bad + 1))
   done
-  printf '%s %s\n' "$reads" "$bad" >"$test_tmp/spin-result"
+  printf '%s %s %s\n' "$reads" "$bad" "$stages" >"$test_tmp/spin-result"
 ) &
 spin_pid=$!
 
@@ -125,32 +150,26 @@ done
 wait "$spin_pid" || true
 spin_pid=""
 
-read -r spin_reads spin_bad <"$test_tmp/spin-result"
+read -r spin_reads spin_bad spin_stages <"$test_tmp/spin-result" 2>/dev/null ||
+  fail "the watching reader died instead of reporting" "no result file at $test_tmp/spin-result"
 (( spin_reads > 1000 )) ||
   fail "the watching reader got too few reads to prove anything" "reads=$spin_reads"
+(( spin_stages > 0 )) ||
+  fail "the reader never caught a stage in flight, so it proved nothing about one" \
+    "reads=$spin_reads"
 (( spin_bad == 0 )) ||
-  fail "a reader never catches color.json absent, half-written, or joined by a staged file" \
+  fail "a reader never catches color.json absent, half-written, or joined by anything else" \
     "reads=$spin_reads bad=$spin_bad"
-pass "replacing color.json never exposes a missing, partial, or extra file to a reader"
 
-# The stage has to share a filesystem with the destination or the rename is a
-# cross-device copy and the window comes back. Normally $policy_dir's parent is
-# that filesystem, which is also why the stage lives there; a managed directory
-# that is a mount of its own is the exception, and the stage moves inside it
-# rather than giving up the atomicity.
-browser_policy_same_filesystem "$test_tmp" "$test_tmp/spin" ||
-  fail "a policy directory and its parent on one filesystem are recognised as such"
-if browser_policy_same_filesystem "$test_tmp" "$test_tmp/missing"; then
-  fail "a missing directory is not reported as sharing a filesystem"
-fi
-if [[ -d /dev/shm ]] && [[ $(stat -c %d -- /dev/shm) != $(stat -c %d -- /) ]]; then
-  browser_policy_same_filesystem / /dev/shm &&
-    fail "two filesystems are not reported as sharing one"
-  pass "a separate mount is recognised as a separate filesystem"
-else
-  skip "no second filesystem here; skipping the separate-mount check"
-fi
-pass "the stage lands on the destination's filesystem"
+# A stage that outlived its write would sit in the browser's policy directory
+# until something removed it.
+shopt -s nullglob dotglob
+spin_left=("$spin/managed"/*)
+shopt -u nullglob dotglob
+(( ${#spin_left[@]} == 1 )) && [[ ${spin_left[0]} == "$spin/managed/color.json" ]] ||
+  fail "a finished write leaves nothing but color.json in the policy directory" \
+    "${spin_left[*]##*/}"
+pass "replacing color.json never exposes a missing or partial file, and leaves no stage behind"
 
 printf 'original\n' >"$test_tmp/pwn"
 rm -f "$write_dir/color.json"

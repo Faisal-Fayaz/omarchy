@@ -10,11 +10,10 @@ set -euo pipefail
 # sudoers rule, or re-execed by require_root below — sudo's secure_path decides
 # where a bare helper resolves, and a dev link (etc/sudoers.d/omarchy-dev-path)
 # prepends a user-writable checkout bin/ to it. Every helper this script calls
-# by bare name (printf's builtin aside: chmod, mktemp, mv, rm, stat) is a
-# system tool, never an omarchy-* command, so pin PATH to trusted system
-# directories and keep root from resolving one out of that checkout. The
-# unprivileged wrapper phase keeps the caller's PATH so it can still find
-# sudo/pkexec.
+# by bare name (printf's builtin aside: chmod, mktemp, mv, rm) is a system tool,
+# never an omarchy-* command, so pin PATH to trusted system directories and keep
+# root from resolving one out of that checkout. The unprivileged wrapper phase
+# keeps the caller's PATH so it can still find sudo/pkexec.
 if (( EUID == 0 )); then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 fi
@@ -93,29 +92,26 @@ for policy_dir in "${POLICY_DIRS[@]}"; do
   [[ -d $policy_dir && ! -L $policy_dir ]] || continue
 
   dest=$policy_dir/color.json
-  # Stage the replacement and finish with rename(2), so a browser reading
-  # color.json during a theme switch sees the old file or the new one, never an
-  # absent one and never a half-written one. install(1) cannot do this: it
-  # unlinks the destination before recreating it, and it copies into place
-  # rather than renaming.
+  # Stage a hidden sibling of color.json and finish with rename(2), so a
+  # browser reading the policy during a theme switch sees the old file or the
+  # new one, never an absent one and never a half-written one. install(1)
+  # cannot do this: it unlinks the destination before recreating it, and it
+  # copies into place rather than renaming.
   #
-  # Two placement rules, and only one directory satisfies both. rename(2) only
-  # swaps atomically within a single filesystem, so the stage cannot live in
-  # $TMPDIR, which is another one often enough to reintroduce this window. And
-  # the browser reads every file in $policy_dir, dotfiles included, so a stage
-  # there would be policy in its own right. The parent satisfies both, unless
-  # $policy_dir is a mount of its own, in which case nothing does and staging
-  # inside it is the lesser problem: the rename stays atomic and the staged
-  # content is the policy about to be published anyway. A stat that cannot
-  # answer falls the same way, which is the safe direction. This mirrors
-  # browser_policy_same_filesystem in install/helpers/browser-policy.sh, which
-  # this script cannot source: it holds root and must not read $OMARCHY_PATH.
-  staging_dir=${policy_dir%/*}
-  if [[ $(stat -c %d -- "$staging_dir" 2>/dev/null) != "$(stat -c %d -- "$policy_dir" 2>/dev/null)" ]]; then
-    staging_dir=$policy_dir
-  fi
-
-  staged=$(mktemp "$staging_dir/.${dest##*/}.omarchy.XXXXXX") || {
+  # The sibling has to be in this directory and not merely on the same
+  # filesystem. rename(2) fails across two mount points even where the same
+  # filesystem is behind both, so a stage anywhere else -- $TMPDIR, or a parent
+  # that is itself a bind mount -- turns the swap back into a copy. Inside this
+  # directory there is nothing to detect and nothing to get wrong.
+  #
+  # The browser enumerates every file in $policy_dir, dotfiles included, so a
+  # stage here is briefly visible to it. That is bounded twice over: the content
+  # is complete before the rename, and ConfigDirPolicyLoader skips a file it
+  # cannot parse rather than applying it. A stage left behind by something the
+  # EXIT trap cannot catch cannot win either, since the provider gives priority
+  # to the last file in lexicographic order and this name sorts before
+  # color.json.
+  staged=$(mktemp "${policy_dir}/.${dest##*/}.omarchy.XXXXXX") || {
     failed=1
     continue
   }

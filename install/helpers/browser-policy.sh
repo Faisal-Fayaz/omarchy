@@ -100,39 +100,32 @@ browser_policy_theme_hex() {
   printf '%s' "$BROWSER_POLICY_DEFAULT_COLOR"
 }
 
-browser_policy_same_filesystem() {
-  [[ -d $1 && -d $2 ]] || return 1
-  [[ $(stat -c %d -- "$1") == "$(stat -c %d -- "$2")" ]]
-}
-
 browser_policy_install_color() {
   local policy_dir=$1
   local hex=$2
   local dest=$policy_dir/color.json
-  local staging_dir
   local tmp
 
   [[ -d $policy_dir && ! -L $policy_dir ]] || return 0
   [[ $hex =~ ^#[0-9a-f]{6}$ ]] || return 1
 
-  # Stage the replacement and finish with rename(2), so a browser reading
-  # color.json sees the old file or the new one rather than an absent or
-  # half-written one. install(1) unlinks the destination before recreating it,
-  # so it cannot do that.
+  # Stage a hidden sibling of color.json and finish with rename(2), so a
+  # browser reading the policy sees the old file or the new one rather than an
+  # absent or half-written one. install(1) unlinks the destination before
+  # recreating it, so it cannot do that.
   #
-  # Two placement rules, and only one directory can satisfy both. rename(2)
-  # only swaps atomically within a single filesystem, which rules out $TMPDIR.
-  # And the browser reads every file in $policy_dir -- Chromium's
-  # ConfigDirPolicyLoader enumerates all of them, dotfiles included -- so a
-  # staged file there would be policy in its own right. The parent satisfies
-  # both, unless $policy_dir is a mount of its own, in which case nothing does
-  # and staging inside it is the lesser problem: the rename stays atomic and
-  # the staged content is the policy about to be published regardless. A stat
-  # that cannot answer falls the same way, which is the safe direction.
-  staging_dir=${policy_dir%/*}
-  browser_policy_same_filesystem "$staging_dir" "$policy_dir" || staging_dir=$policy_dir
-
-  tmp=$(mktemp "$staging_dir/.${dest##*/}.omarchy.XXXXXX") || return 1
+  # The sibling has to be in this directory and not merely on the same
+  # filesystem: rename(2) fails across two mount points even where the same
+  # filesystem is behind both, so a stage in $policy_dir's parent or in
+  # $TMPDIR would turn the swap back into a copy.
+  #
+  # The browser enumerates every file in $policy_dir, dotfiles included, so the
+  # stage is briefly visible to it. The content is complete before the rename,
+  # ConfigDirPolicyLoader skips a file it cannot parse rather than applying it,
+  # and a stage that outlives the write cannot win the merge anyway: the
+  # provider gives priority to the last file in lexicographic order and this
+  # name sorts before color.json.
+  tmp=$(mktemp "${policy_dir}/.${dest##*/}.omarchy.XXXXXX") || return 1
   printf '{"BrowserThemeColor": "%s", "BrowserColorScheme": "device"}\n' "$hex" >"$tmp"
   chmod 0644 "$tmp"
 
