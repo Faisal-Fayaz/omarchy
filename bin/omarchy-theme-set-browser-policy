@@ -115,10 +115,16 @@ for policy_dir in "${POLICY_DIRS[@]}"; do
     failed=1
     continue
   }
-  printf '{"BrowserThemeColor": "#%s", "BrowserColorScheme": "device"}\n' "$color" >"$staged"
   # Root-owned already: the privileged half of this script is what created it,
   # which is all install(1)'s -o root -g root was ever asserting here.
-  chmod 0644 "$staged"
+  if ! printf '{"BrowserThemeColor": "#%s", "BrowserColorScheme": "device"}\n' "$color" >"$staged" ||
+    ! chmod 0644 "$staged"; then
+    rm -f "$staged"
+    staged=""
+    echo "omarchy-theme-set-browser-policy: cannot write $dest" >&2
+    failed=1
+    continue
+  fi
 
   if [[ -L $dest || -d $dest ]]; then
     if ! rm -rf -- "$dest"; then

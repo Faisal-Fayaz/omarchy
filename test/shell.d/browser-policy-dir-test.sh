@@ -75,6 +75,22 @@ else
   pass "a failed staging write does not truncate color.json"
 fi
 
+# The stage shares the destination's filesystem, so a full disk fails the write
+# into it; called from an if, errexit would not stop that stage being published.
+for broken in printf chmod; do
+  half=$test_tmp/half-$broken
+  mkdir -p "$half"
+  printf '{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}\n' >"$half/color.json"
+  if (eval "$broken() { return 1; }"; browser_policy_install_color "$half" "#dead00"); then
+    fail "theme colour fails when $broken cannot prepare the stage"
+  fi
+  [[ $(<"$half/color.json") == '{"BrowserThemeColor": "#aabbcc", "BrowserColorScheme": "device"}' ]] ||
+    fail "a failed $broken leaves the existing color.json intact" "$(<"$half/color.json")"
+  half_left=("$half"/.color.json.omarchy.*)
+  [[ ! -e ${half_left[0]} ]] || fail "a failed $broken leaves no stage behind"
+done
+pass "a stage that could not be written or made 0644 is never published"
+
 # Why stage at all: a browser reading its managed policy while the theme
 # changes must see the old file or the new one, never an absent one and never
 # a half-written one. install(1) unlinks the destination before recreating it,

@@ -126,8 +126,11 @@ browser_policy_install_color() {
   # provider gives priority to the last file in lexicographic order and this
   # name sorts before color.json.
   tmp=$(mktemp "${policy_dir}/.${dest##*/}.omarchy.XXXXXX") || return 1
-  printf '{"BrowserThemeColor": "%s", "BrowserColorScheme": "device"}\n' "$hex" >"$tmp"
-  chmod 0644 "$tmp"
+  if ! printf '{"BrowserThemeColor": "%s", "BrowserColorScheme": "device"}\n' "$hex" >"$tmp" ||
+    ! chmod 0644 "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
 
   if [[ -L $dest || -d $dest ]]; then
     if ! rm -rf -- "$dest" 2>/dev/null; then
