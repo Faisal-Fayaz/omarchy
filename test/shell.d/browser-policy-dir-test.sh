@@ -99,6 +99,9 @@ printf '%s\n' "$spin_old" >"$spin/managed/color.json"
   # zero entries instead of the literal pattern. A read that races a
   # disappearing file says so on stderr; count it and keep the output clean.
   shopt -s nullglob dotglob
+  # Glob order follows the locale's collation, which puts the stage either side
+  # of color.json; byte order always puts the leading dot first.
+  LC_ALL=C
   exec 2>/dev/null
   # This subshell measures the reader, so it must survive whatever the writer
   # does. Under set -e a file that vanishes mid-read kills the read *and* the
@@ -126,8 +129,8 @@ printf '%s\n' "$spin_old" >"$spin/managed/color.json"
     case ${#entries[@]} in
       1) [[ ${entries[0]} == "$spin/managed/color.json" ]] || bad=$((bad + 1)) ;;
       2)
-        [[ ${entries[0]} == "$spin/managed/color.json" ]] || bad=$((bad + 1))
-        [[ ${entries[1]} == "$spin/managed"/.color.json.omarchy.* ]] || bad=$((bad + 1))
+        [[ ${entries[0]} == "$spin/managed"/.color.json.omarchy.* ]] || bad=$((bad + 1))
+        [[ ${entries[1]} == "$spin/managed/color.json" ]] || bad=$((bad + 1))
         stages=$((stages + 1))
         ;;
       *) bad=$((bad + 1));;
